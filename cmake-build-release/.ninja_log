@@ -1,0 +1,6 @@
+# ninja log v5
+1	718	6761143815686742	CMakeFiles/rendering1.dir/main.cpp.obj	1306fae565ee173b
+722	874	6761143817212143	rendering1.exe	fc54c5b1e1a6e9d1
+2	1037	6761147851019792	CMakeFiles/rendering1.dir/Camera.cpp.obj	83ae57c3d50cd0ca
+13	1850	6761147859148305	CMakeFiles/rendering1.dir/main.cpp.obj	1306fae565ee173b
+1850	2006	6761147860679112	rendering1.exe	530d95335afd5e0b

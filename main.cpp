@@ -5,11 +5,11 @@
 #include <ctime>
 #include <fstream>
 #include <string>
-#include "../Rendering/Camera.h"
+#include "./Camera.h"
 
-#define TRIANGLE_NUM 6
+#define TRIANGLE_NUM 9
 #define RECTANGLE_NUM 2
-#define LIGHT_SOURCE_NUM 5
+#define LIGHT_SOURCE_NUM 7
 enum MouseMode {
     MM_CAMERA
 };
@@ -37,6 +37,7 @@ struct TriangleObj {
     Eigen::Vector3d v3;
     Eigen::Vector3d n;
     Eigen::Vector3d color;
+    std::string color_name;
     double area;
     bool is_light;
     double kd;
@@ -44,7 +45,7 @@ struct TriangleObj {
 
 const int g_FilmWidth = 640;
 const int g_FilmHeight = 480;
-const int sample_num = 50;
+const int sample_num = 10000;
 
 int mx, my;
 int width = 640;
@@ -52,13 +53,16 @@ int height = 480;
 int NUM_OF_SAMPLE = 0;
 int *g_CountBuffer = nullptr;
 int method_num = 2;
+int count_rayhit_idx[TRIANGLE_NUM];
+Eigen::Vector3d sum;
 
 const double __FAR__ = 1.0e33;
 
-double intensity = 50;
+double intensity = 2.5;
 double g_FrameSize_WindowSize_Scale_x = 1.0;
 double g_FrameSize_WindowSize_Scale_y = 1.0;
 double tri_area = 0.0;
+double A = 0.0;
 double pdf[TRIANGLE_NUM];
 double cdf[LIGHT_SOURCE_NUM];
 
@@ -78,7 +82,7 @@ inline float drand48() {
     return float(((double) (rand()) / (RAND_MAX))); /* RAND_MAX = 32767 */
 }
 
-//RGB値(0~255)を(0~1)に正規化
+//RGB値(0~255)を(0~1)へ正規化
 Eigen::Vector3d rgbNormalize(const Eigen::Vector3d rgb) {
     Eigen::Vector3d out_rgb{rgb.x() / 255, rgb.y() / 255, rgb.z() / 255};
     return out_rgb;
@@ -173,11 +177,12 @@ makeRectangle(const Eigen::Vector3d &centerPos, const Eigen::Vector3d &widthVec,
     out_Rect.n = ((v1 - v3).cross(v2 - v3)).normalized();
 }
 
-void makeTriangle(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2, const Eigen::Vector3d &v3, const Eigen::Vector3d &color, const bool &is_light, const double &kd, TriangleObj &out_Tri) {
+void makeTriangle(const Eigen::Vector3d &v1, const Eigen::Vector3d &v2, const Eigen::Vector3d &v3, const Eigen::Vector3d &color, const std::string &color_name, const bool &is_light, const double &kd, TriangleObj &out_Tri) {
     out_Tri.v1 = v1;
     out_Tri.v2 = v2;
     out_Tri.v3 = v3;
     out_Tri.color = rgbNormalize(color);
+    out_Tri.color_name = color_name;
     out_Tri.area = (((v2 - v1).cross(v3 - v1)) / 2).norm();
     out_Tri.is_light = is_light;
     out_Tri.kd = kd;
@@ -250,7 +255,7 @@ void rayTriangleIntersection(const TriangleObj &tris, const Ray &in_Ray, RayHit 
 
     const Eigen::Vector2d alpha_beta = ATA.inverse() * b;
 
-    //三角形内部かどうかの判定
+    //三角形の内部判定
     if (alpha_beta.x() < 0.0 || 1.0 < alpha_beta.x() || alpha_beta.y() < 0.0 ||
         1.0 < alpha_beta.y() || (1 - alpha_beta.x() - alpha_beta.y()) < 0.0 ||
         1.0 < (1 - alpha_beta.x() - alpha_beta.y()))
@@ -293,6 +298,10 @@ void CalcAdoptionRatio() {
 
 void ChooseTriangle(int &t) {
     double random = drand48();
+    int mid = LIGHT_SOURCE_NUM / 2;
+    int min = 0;
+    int max = LIGHT_SOURCE_NUM - 1;
+
     for (int i = 0; i < LIGHT_SOURCE_NUM; i++) {
         if (random < cdf[i]) {
             t = i;
@@ -300,6 +309,7 @@ void ChooseTriangle(int &t) {
         }
     }
 }
+
 
 void rayTracing(const Ray &in_Ray, RayHit &io_Hit) {
     double t_min = __FAR__;
@@ -324,11 +334,79 @@ void rayTracing(const Ray &in_Ray, RayHit &io_Hit) {
     io_Hit.mesh_idx = mesh_idx;
 }
 
+void directional_sampling(const Eigen::Vector3d &x, const RayHit &ray_hit, Eigen::Vector3d &pixel_color) {
+
+    for (int n = 0; n < sample_num; n++) {
+        const double theta = asin(sqrt(drand48()));
+        const double phi = 2 * M_PI * drand48();
+        const Eigen::Vector3d u = tris[ray_hit.mesh_idx].n;
+        const Eigen::Vector3d v = u.y() < 1 ? u.cross(Eigen::Vector3d{0.0, 1.0, 0.0}).normalized() : u.cross(Eigen::Vector3d{1.0, 0.0, 0.0}).normalized();
+        const Eigen::Vector3d w = v.cross(u);
+        const Eigen::Vector3d omega_yup = {sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)};
+        const Eigen::Vector3d omega = omega_yup.y() * u + omega_yup.x() * v + omega_yup.z() * w;
+
+        Ray _ray;
+        _ray.o = x;
+        _ray.d = omega;
+
+        RayHit _ray_hit;
+
+        rayTracing(_ray, _ray_hit);
+
+        if (_ray_hit.mesh_idx != -1 && tris[_ray_hit.mesh_idx].is_light == true) {
+            sum = sum + intensity * tris[_ray_hit.mesh_idx].color;
+        }
+
+    }
+    pixel_color = tris[ray_hit.mesh_idx].kd * tris[ray_hit.mesh_idx].color.cwiseProduct(sum);
+
+}
+
+void surface_sampling(const Eigen::Vector3d &x, const RayHit &ray_hit, Eigen::Vector3d &pixel_color) {
+
+    for (int i = 0; i < sample_num; i++) {
+        int tri_idx;
+        int V = 1;
+        ChooseTriangle(tri_idx);
+        const float gamma = 1.0 - sqrt(1.0 - drand48());
+        const float beta = drand48() * (1.0 - gamma);
+        const Eigen::Vector3d xa = (1.0 - beta - gamma) * tris[tri_idx].v1 + beta * tris[tri_idx].v2 + gamma * tris[tri_idx].v3;
+        const Eigen::Vector3d xa_x = xa - x;
+        const Eigen::Vector3d w = xa_x.normalized();
+        const Eigen::Vector3d ny = tris[tri_idx].n;
+        const Eigen::Vector3d nx = tris[ray_hit.mesh_idx].n;
+        const double cosx = w.dot(nx);
+        const double cosy = (-w).dot(ny);
+
+        count_rayhit_idx[tri_idx] += 1;
+
+//        Ray _ray;
+//        _ray.o = x;
+//        _ray.d = xa;
+//
+//        RayHit _ray_hit;
+//
+//        rayTracing(_ray, _ray_hit);
+//
+//        if (_ray_hit.mesh_idx != -1) {
+//            V = 0;
+//        }
+
+        sum += (intensity * tris[ray_hit.mesh_idx].kd / M_PI * cosx * cosy / xa_x.squaredNorm() * V) * tris[tri_idx].color;
+    }
+
+    double totalTriangleArea = 0.0;
+    TotalTriangleArea(totalTriangleArea);
+    sum *= totalTriangleArea;
+    pixel_color = tris[ray_hit.mesh_idx].color.cwiseProduct(sum);
+
+}
+
 void saveppm() {
 
     std::ofstream writing_file;
     std::string filename;
-    std::string path = "C:/Users/narus/cg_ppm/";
+    std::string path = "C:/Users/narus/";
 
     if (method_num == 1)
         filename = path + "method1_" + std::to_string(NUM_OF_SAMPLE) + ".ppm";
@@ -352,8 +430,7 @@ void saveppm() {
 
 
 void Learn() {
-    double A = 0.0;
-    Eigen::Vector3d sum;
+    memset(count_rayhit_idx, 0, sizeof count_rayhit_idx);
     for (int Y = 0; Y < g_FilmHeight; Y++) {
         for (int X = 0; X < g_FilmWidth; X++) {
             const int pixel_idx = Y * g_FilmWidth + X;
@@ -368,14 +445,13 @@ void Learn() {
 
             if (ray_hit.mesh_idx >= 0) {
                 if (tris[ray_hit.mesh_idx].is_light == true) {
-                    // 当たった面が光源ならば光源の色を返す
                     for (int i = 0; i < 3; i++) {
                         g_AccumulationBuffer[pixel_idx * 3 + i] += tris[ray_hit.mesh_idx].color[i];
                     }
                     g_CountBuffer[pixel_idx] += 1;
 
                 } else {
-                    //飛ばしたレイと拡散面との交点x
+                    //飛ばされたレイと拡散面上の点
                     const Eigen::Vector3d x = ray.o + ray_hit.t * ray.d;
                     Eigen::Vector3d pixel_color;
                     Eigen::Vector3d I_n;
@@ -384,65 +460,17 @@ void Learn() {
                     //方向サンプリング
                     if (method_num == 1) {
 
-                        for (int n = 0; n < sample_num; n++) {
-                            const double theta = asin(sqrt(drand48()));
-                            const double phi = 2 * M_PI * drand48();
-                            const Eigen::Vector3d omega = {sin(theta) * cos(phi), cos(theta), sin(theta) * sin(phi)};
+                        directional_sampling(x, ray_hit, pixel_color);
 
-                            Ray _ray;
-                            _ray.o = x;
-                            _ray.d = omega;
-
-                            RayHit _ray_hit;
-
-                            rayTracing(_ray, _ray_hit);
-
-                            if (_ray_hit.mesh_idx == -1 || rects[_ray_hit.mesh_idx].is_light == false) {
-                                //何もしない
-                            } else {
-                                sum = sum + intensity * tris[_ray_hit.mesh_idx].color;
-                            }
-                        }
-                        I_n = sum;
-                        pixel_color = tris[ray_hit.mesh_idx].kd * tris[ray_hit.mesh_idx].color.cwiseProduct(I_n);
                     }
                     //面サンプリング
                     if (method_num == 2) {
 
-                        for (int i = 0; i < sample_num; i++) {
-                            int tri_idx;
-                            int V = 1;
-                            ChooseTriangle(tri_idx);
-                            A = tris[tri_idx].area;
-                            const float gamma = 1.0 - sqrt(1.0 - drand48());
-                            const float beta = drand48() * (1.0 - gamma);
-                            const Eigen::Vector3d xa = (1.0 - beta - gamma) * tris[tri_idx].v1 + beta * tris[tri_idx].v2 + gamma * tris[tri_idx].v3;
-                            const Eigen::Vector3d xa_x = xa - x;
-                            const Eigen::Vector3d w = xa_x.normalized();
-                            const Eigen::Vector3d ny = tris[tri_idx].n;
-                            const Eigen::Vector3d nx = tris[ray_hit.mesh_idx].n;
-                            const double cosx = w.dot(nx);
-                            const double cosy = (-w).dot(ny);
+                        surface_sampling(x, ray_hit, pixel_color);
 
-                            Ray _ray;
-                            _ray.o = x;
-                            _ray.d = xa;
-
-                            RayHit _ray_hit;
-
-                            rayTracing(_ray, _ray_hit);
-
-                            if (_ray_hit.mesh_idx == -1 || tris[_ray_hit.mesh_idx].is_light == false) {
-                                V = 0;
-                            }
-
-                            sum = sum + (intensity * tris[ray_hit.mesh_idx].kd / M_PI * cosx * cosy / xa_x.squaredNorm() * V) * tris[tri_idx].color;
-                        }
-                        I_n = sum * A;
-                        pixel_color = tris[ray_hit.mesh_idx].color.cwiseProduct(I_n);
                     }
 
-                    //求めたRGB値をピクセルごとにフィルムへ投影
+                    //求めたRGB値をピクセルごとに代入
                     for (int i = 0; i < 3; i++) {
                         g_AccumulationBuffer[pixel_idx * 3 + i] += pixel_color[i];
                     }
@@ -451,13 +479,18 @@ void Learn() {
 
                 }
             } else {
-                const Eigen::Vector3d pixel_color = rgbNormalize(Eigen::Vector3d{173, 216, 230});
+                const Eigen::Vector3d pixel_color = rgbNormalize(Eigen::Vector3d{40, 40, 40});
                 for (int i = 0; i < 3; i++) {
                     g_AccumulationBuffer[pixel_idx * 3 + i] += pixel_color[i];
                 }
                 g_CountBuffer[pixel_idx] += 1;
             }
         }
+    }
+    std::cout << NUM_OF_SAMPLE << std::endl;
+    double tri_area_1 = count_rayhit_idx[0] / tris[0].area;
+    for (int i = 0; i < LIGHT_SOURCE_NUM; i++) {
+        std::cout << "No." << i << " " << (count_rayhit_idx[i] / tris[i].area) / tri_area_1 << std::endl;
     }
     updateFilm();
     glutPostRedisplay();
@@ -585,8 +618,8 @@ void resize(int w, int h) {
 }
 
 int main(int argc, char *argv[]) {
-    g_Camera.setEyePoint(Eigen::Vector3d{0.0, 1.5, 5.5});
-    g_Camera.lookAt(Eigen::Vector3d{0.0, 0.5, 0.0}, Eigen::Vector3d{0.0, 1.0, 0.0});
+    g_Camera.setEyePoint(Eigen::Vector3d{6.0, 1.5, 1.0});
+    g_Camera.lookAt(Eigen::Vector3d{0.0, 0.5, -1.25}, Eigen::Vector3d{0.0, 1.0, 0.0});
 
     glutInit(&argc, argv);
     glutInitWindowSize(width, height);
@@ -605,12 +638,16 @@ int main(int argc, char *argv[]) {
     makeRectangle(Eigen::Vector3d{0.0, 0.0, -1.0}, Eigen::Vector3d{1.0, 0.0, 0.0}, Eigen::Vector3d{0.0, 0.0, -1.0}, Eigen::Vector3d{255, 255, 255}, false, 1.0, rects[0]);
     makeRectangle(Eigen::Vector3d{0.0, 1.0, -2.0}, Eigen::Vector3d{1.0, 0.0, 0.0}, Eigen::Vector3d{0.0, 1.0, 0.0}, Eigen::Vector3d{255, 255, 255}, true, 1.0, rects[1]);
 
-    makeTriangle(Eigen::Vector3d{-2.0, 2.25, -2.0}, Eigen::Vector3d{-3.0, 0.0, -2.0}, Eigen::Vector3d{0.0, 0.0, -2.0}, Eigen::Vector3d{215.0, 14.0, 74.0}, true, 1.0, tris[0]);
-    makeTriangle(Eigen::Vector3d{0.25, 0.0, -2.0}, Eigen::Vector3d{0.5, 1.5, -2.0}, Eigen::Vector3d{-1.5, 2.25, -2.0}, Eigen::Vector3d{1.0, 195.0, 215.0}, true, 1.0, tris[1]);
-    makeTriangle(Eigen::Vector3d{1.5, 2.5, -2.0}, Eigen::Vector3d{0.75, 1.0, -2.0}, Eigen::Vector3d{1.75, 0.0, -2.0}, Eigen::Vector3d{50.0, 205.0, 50.0}, true, 1.0, tris[2]);
-    makeTriangle(Eigen::Vector3d{0.75, 0.75, -2.0}, Eigen::Vector3d{0.5, 0.0, -2.0}, Eigen::Vector3d{1.5, 0.0, -2.0}, Eigen::Vector3d{255.0, 244.0, 1.0}, true, 1.0, tris[3]);
-    makeTriangle(Eigen::Vector3d{2.0, 1.5, -2.0}, Eigen::Vector3d{2.0, 0.0, -2.0}, Eigen::Vector3d{3.0, 0.0, -2.0}, Eigen::Vector3d{147.0, 112.0, 219.0}, true, 1.0, tris[4]);
-    makeTriangle(Eigen::Vector3d{0.0, 0.0, 1.5}, Eigen::Vector3d{3.0, 0.0, -1.5}, Eigen::Vector3d{-3.0, 0.0, -1.5}, Eigen::Vector3d{255.0, 255.0, 255.0}, false, 1.0, tris[5]);
+    makeTriangle(Eigen::Vector3d{-2.0, 2.25, -2.0}, Eigen::Vector3d{-3.0, 0.0, -2.0}, Eigen::Vector3d{0.0, 0.0, -2.0}, Eigen::Vector3d{215.0, 14.0, 74.0}, "Red", true, 1.0, tris[0]);
+    makeTriangle(Eigen::Vector3d{0.25, 0.0, -2.0}, Eigen::Vector3d{0.5, 1.5, -2.0}, Eigen::Vector3d{-1.5, 2.25, -2.0}, Eigen::Vector3d{1.0, 195.0, 215.0}, "Blue", true, 1.0, tris[1]);
+    makeTriangle(Eigen::Vector3d{1.5, 2.5, -2.0}, Eigen::Vector3d{0.75, 1.0, -2.0}, Eigen::Vector3d{1.75, 0.0, -2.0}, Eigen::Vector3d{50.0, 205.0, 50.0}, "Green", true, 1.0, tris[2]);
+    makeTriangle(Eigen::Vector3d{0.75, 0.75, -2.0}, Eigen::Vector3d{0.5, 0.0, -2.0}, Eigen::Vector3d{1.5, 0.0, -2.0}, Eigen::Vector3d{255.0, 244.0, 1.0}, "Yellow", true, 1.0, tris[3]);
+    makeTriangle(Eigen::Vector3d{2.0, 1.5, -2.0}, Eigen::Vector3d{2.0, 0.0, -2.0}, Eigen::Vector3d{3.0, 0.0, -2.0}, Eigen::Vector3d{147.0, 112.0, 219.0}, "Purple", true, 1.0, tris[4]);
+    makeTriangle(Eigen::Vector3d{0.5, 0.25, 0.5}, Eigen::Vector3d{0.25, 0.0, 0.5}, Eigen::Vector3d{0.75, 0.0, 0.25}, Eigen::Vector3d{255.0, 255.0, 255.0}, "White", true, 1.0, tris[5]);
+    makeTriangle(Eigen::Vector3d{-1.0, 1.5, 1.25}, Eigen::Vector3d{-1.0, 0.0, 1.25}, Eigen::Vector3d{-1.75, 0.0, 0.5}, Eigen::Vector3d{210.0, 105.0, 30.0}, "Orange", true, 1.0, tris[6]);
+    makeTriangle(Eigen::Vector3d{0.0, 0.0, 1.5}, Eigen::Vector3d{3.0, 0.0, -1.5}, Eigen::Vector3d{-3.0, 0.0, -1.5}, Eigen::Vector3d{255.0, 255.0, 255.0}, "Diffusion_Surface_1", false, 1.0, tris[7]);
+    makeTriangle(Eigen::Vector3d{-1.0, 0.0, -1.0}, Eigen::Vector3d{-0.5, 0.5, -1.0}, Eigen::Vector3d{-1.5, 0.5, -1.0}, Eigen::Vector3d{255.0, 255.0, 255.0}, "Diffusion_Surface_2", false, 1.0, tris[8]);
+
 
     CalcAdoptionRatio();
 
@@ -625,5 +662,6 @@ int main(int argc, char *argv[]) {
     clearRayTracedResult();
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     glutMainLoop();
+
     return 0;
 }
